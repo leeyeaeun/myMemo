@@ -986,14 +986,8 @@ class NotesWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self.save_timer.stop(); self.save_current(False)
-        pinned_stickies = [
-            sticky for sticky in self.stickies.values()
-            if sticky.note["window"].get("pinned") and sticky.isVisible()
-        ]
-        if pinned_stickies:
-            for sticky in list(self.stickies.values()):
-                if sticky not in pinned_stickies:
-                    sticky.close()
+        visible_stickies = [sticky for sticky in self.stickies.values() if sticky.isVisible()]
+        if visible_stickies:
             self.store.save()
             event.accept()
             return

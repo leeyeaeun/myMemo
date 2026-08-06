@@ -3,20 +3,22 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from PySide6.QtCore import QBuffer, QByteArray, QEvent, QIODevice, QPoint, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QKeySequence, QImage, QTextCharFormat, QTextCursor, QTextImageFormat, QTextListFormat
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QImage, QTextCharFormat, QTextCursor, QTextImageFormat, QTextListFormat
 from PySide6.QtWidgets import (
     QApplication, QColorDialog, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
+    QGraphicsDropShadowEffect, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPushButton, QSizeGrip, QSlider, QSplitter, QTextEdit, QToolButton, QVBoxLayout, QWidget,
 )
 
-APP_NAME = "Morrow Notes"
+APP_NAME = "Memo"
+LEGACY_APP_NAME = "Morrow Notes"
 NOTE_COLORS = ["#FFF3B8", "#E9E0FF", "#DDF5E8", "#FFDDE3", "#DCEEFF", "#F2EEE8"]
 THEMES = {
     "Sorbet": ["#FFD9E2", "#FFE7C2", "#FFF2B8", "#DDF5E8", "#DCEEFF", "#E9E0FF"],
@@ -26,14 +28,23 @@ THEMES = {
 }
 
 
+def asset_path(name: str) -> Path:
+    return Path(__file__).resolve().parent / "assets" / name
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 def storage_path() -> Path:
-    folder = Path(os.getenv("LOCALAPPDATA", Path.home())) / APP_NAME
+    local_root = Path(os.getenv("LOCALAPPDATA", Path.home()))
+    folder = local_root / APP_NAME
     folder.mkdir(parents=True, exist_ok=True)
-    return folder / "notes.json"
+    path = folder / "notes.json"
+    legacy_path = local_root / LEGACY_APP_NAME / "notes.json"
+    if not path.exists() and legacy_path.exists():
+        shutil.copy2(legacy_path, path)
+    return path
 
 
 def new_note(color: str = NOTE_COLORS[0]) -> dict:
@@ -65,12 +76,10 @@ def text_color(background: str) -> str:
     return "#202020" if luminance > 150 else "#FFFFFF"
 
 
-def image_data_uri(path: str) -> tuple[str, int, int] | None:
-    image = QImage(path)
+def qimage_data_uri(image: QImage, image_format: str = "PNG") -> tuple[str, int, int] | None:
     if image.isNull():
         return None
-    suffix = Path(path).suffix.lower()
-    fmt = "JPEG" if suffix in {".jpg", ".jpeg"} else "PNG"
+    fmt = "JPEG" if image_format.upper() in {"JPG", "JPEG"} else "PNG"
     data = QByteArray()
     buffer = QBuffer(data)
     buffer.open(QIODevice.OpenModeFlag.WriteOnly)
@@ -78,6 +87,12 @@ def image_data_uri(path: str) -> tuple[str, int, int] | None:
     mime = "image/jpeg" if fmt == "JPEG" else "image/png"
     uri = f"data:{mime};base64,{base64.b64encode(bytes(data)).decode('ascii')}"
     return uri, image.width(), image.height()
+
+
+def image_data_uri(path: str) -> tuple[str, int, int] | None:
+    suffix = Path(path).suffix.lower()
+    image_format = "JPEG" if suffix in {".jpg", ".jpeg"} else "PNG"
+    return qimage_data_uri(QImage(path), image_format)
 
 
 class Store:
@@ -137,6 +152,9 @@ class RichEditor(QTextEdit):
         result = image_data_uri(path)
         if not result:
             return
+        self.insert_embedded_image(result, max_width)
+
+    def insert_embedded_image(self, result: tuple[str, int, int], max_width: int) -> None:
         uri, source_w, source_h = result
         width = min(source_w, max_width)
         image = QTextImageFormat()
@@ -145,10 +163,27 @@ class RichEditor(QTextEdit):
         image.setHeight(round(width * source_h / max(source_w, 1)))
         self.textCursor().insertImage(image)
 
+    def canInsertFromMimeData(self, source) -> bool:
+        return source.hasImage() or super().canInsertFromMimeData(source)
+
+    def insertFromMimeData(self, source) -> None:
+        if source.hasImage():
+            clipboard_image = source.imageData()
+            if hasattr(clipboard_image, "toImage"):
+                clipboard_image = clipboard_image.toImage()
+            if isinstance(clipboard_image, QImage) and not clipboard_image.isNull():
+                result = qimage_data_uri(clipboard_image)
+                if result:
+                    available_width = max(180, self.viewport().width() - 28)
+                    self.insert_embedded_image(result, available_width)
+                    return
+        super().insertFromMimeData(source)
+
 
 class StickyWindow(QWidget):
     changed = Signal(str)
     closed = Signal(str)
+    RESIZE_MARGIN = 11
 
     def __init__(self, note: dict, save_callback) -> None:
         super().__init__(None, Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
@@ -157,14 +192,20 @@ class StickyWindow(QWidget):
         self.app_shutdown = False
         self.drag_origin: QPoint | None = None
         self.window_origin: QPoint | None = None
+        self.resize_edges = Qt.Edge(0)
+        self.resize_origin: QPoint | None = None
+        self.resize_geometry = None
         self.loading = True
         self.save_timer = QTimer(self)
         self.save_timer.setSingleShot(True)
         self.save_timer.setInterval(300)
         self.save_timer.timeout.connect(self.save_note)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        self.setMinimumSize(240, 220)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setMouseTracking(True)
+        self.setMinimumSize(260, 240)
         self.build_ui()
+        self.register_shortcuts()
         self.restore_geometry()
         self.refresh_style()
         self.loading = False
@@ -172,8 +213,21 @@ class StickyWindow(QWidget):
     def build_ui(self) -> None:
         self.setObjectName("stickyWindow")
         root = QVBoxLayout(self)
-        root.setContentsMargins(1, 1, 1, 1)
+        root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(0)
+
+        self.surface = QFrame()
+        self.surface.setObjectName("stickySurface")
+        self.surface.setMouseTracking(True)
+        shadow = QGraphicsDropShadowEffect(self.surface)
+        shadow.setBlurRadius(28)
+        shadow.setOffset(0, 5)
+        shadow.setColor(QColor(0, 0, 0, 62))
+        self.surface.setGraphicsEffect(shadow)
+        root.addWidget(self.surface)
+        surface_layout = QVBoxLayout(self.surface)
+        surface_layout.setContentsMargins(1, 1, 1, 1)
+        surface_layout.setSpacing(0)
 
         self.header = QWidget()
         self.header.setObjectName("stickyHeader")
@@ -192,17 +246,19 @@ class StickyWindow(QWidget):
         row.addWidget(self.pin_btn)
         row.addWidget(self.color_btn)
         row.addWidget(self.close_btn)
-        root.addWidget(self.header)
+        surface_layout.addWidget(self.header)
 
         self.toolbar = QWidget()
         self.toolbar.setObjectName("stickyToolbar")
         tools = QHBoxLayout(self.toolbar)
         tools.setContentsMargins(9, 3, 9, 5)
         tools.setSpacing(1)
-        tools.addWidget(self.button("B", "굵게", self.bold))
-        tools.addWidget(self.button("U", "밑줄", self.underline))
+        tools.addWidget(self.button("B", "굵게  Ctrl+B", self.bold))
+        tools.addWidget(self.button("I", "기울임  Ctrl+I", self.italic))
+        tools.addWidget(self.button("U", "밑줄  Ctrl+U", self.underline))
         self.size_box = QComboBox()
         self.size_box.addItems(["12", "14", "16", "18", "22", "28", "36"])
+        self.size_box.setEditable(True)
         self.size_box.setCurrentText("16")
         self.size_box.activated.connect(self.font_size)
         tools.addWidget(self.size_box)
@@ -211,7 +267,7 @@ class StickyWindow(QWidget):
         tools.addWidget(self.button("R", "오른쪽 정렬", lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignRight)))
         tools.addWidget(self.button("IMG", "이미지", self.add_image))
         tools.addStretch()
-        root.addWidget(self.toolbar)
+        surface_layout.addWidget(self.toolbar)
         self.toolbar.hide()
 
         self.editor = RichEditor()
@@ -219,7 +275,7 @@ class StickyWindow(QWidget):
         self.editor.setHtml(self.note.get("html", ""))
         self.editor.textChanged.connect(self.queue_save)
         self.editor.image_resize_requested.connect(lambda: resize_image(self, self.editor))
-        root.addWidget(self.editor, 1)
+        surface_layout.addWidget(self.editor, 1)
 
         bottom = QHBoxLayout()
         bottom.setContentsMargins(10, 2, 4, 4)
@@ -227,11 +283,30 @@ class StickyWindow(QWidget):
         self.saved.setObjectName("stickySaved")
         bottom.addWidget(self.saved)
         bottom.addStretch()
-        bottom.addWidget(QSizeGrip(self))
-        root.addLayout(bottom)
+        bottom.addWidget(QSizeGrip(self.surface))
+        surface_layout.addLayout(bottom)
 
         self.header.installEventFilter(self)
         self.title.installEventFilter(self)
+
+    def register_shortcuts(self) -> None:
+        shortcuts = [
+            ("Ctrl+B", self.bold),
+            ("Ctrl+I", self.italic),
+            ("Ctrl+U", self.underline),
+            ("Ctrl+Shift+.", lambda: self.adjust_font_size(2)),
+            ("Ctrl+Shift+,", lambda: self.adjust_font_size(-2)),
+            ("Ctrl+]", lambda: self.adjust_font_size(2)),
+            ("Ctrl+[", lambda: self.adjust_font_size(-2)),
+        ]
+        self.shortcut_actions = []
+        for keys, callback in shortcuts:
+            action = QAction(self)
+            action.setShortcut(QKeySequence(keys))
+            action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            action.triggered.connect(callback)
+            self.addAction(action)
+            self.shortcut_actions.append(action)
 
     def button(self, text, tip, callback) -> QToolButton:
         button = QToolButton()
@@ -255,6 +330,78 @@ class StickyWindow(QWidget):
                 self.drag_origin = None
                 self.persist_geometry()
         return super().eventFilter(watched, event)
+
+    def edges_at(self, pos: QPoint):
+        margin = self.RESIZE_MARGIN
+        edges = Qt.Edge(0)
+        if pos.x() <= margin:
+            edges |= Qt.Edge.LeftEdge
+        elif pos.x() >= self.width() - margin:
+            edges |= Qt.Edge.RightEdge
+        if pos.y() <= margin:
+            edges |= Qt.Edge.TopEdge
+        elif pos.y() >= self.height() - margin:
+            edges |= Qt.Edge.BottomEdge
+        return edges
+
+    def update_resize_cursor(self, edges) -> None:
+        if edges in (Qt.Edge.LeftEdge | Qt.Edge.TopEdge, Qt.Edge.RightEdge | Qt.Edge.BottomEdge):
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        elif edges in (Qt.Edge.RightEdge | Qt.Edge.TopEdge, Qt.Edge.LeftEdge | Qt.Edge.BottomEdge):
+            self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+        elif edges & (Qt.Edge.LeftEdge | Qt.Edge.RightEdge):
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        elif edges & (Qt.Edge.TopEdge | Qt.Edge.BottomEdge):
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+        else:
+            self.unsetCursor()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            edges = self.edges_at(event.position().toPoint())
+            if edges:
+                self.resize_edges = edges
+                self.resize_origin = event.globalPosition().toPoint()
+                self.resize_geometry = self.geometry()
+                handle = self.windowHandle()
+                if handle and handle.startSystemResize(edges):
+                    event.accept()
+                    return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self.resize_origin and self.resize_edges and event.buttons() & Qt.MouseButton.LeftButton:
+            delta = event.globalPosition().toPoint() - self.resize_origin
+            rect = self.resize_geometry
+            left, top, right, bottom = rect.left(), rect.top(), rect.right(), rect.bottom()
+            if self.resize_edges & Qt.Edge.LeftEdge:
+                left = min(left + delta.x(), right - self.minimumWidth() + 1)
+            if self.resize_edges & Qt.Edge.RightEdge:
+                right = max(right + delta.x(), left + self.minimumWidth() - 1)
+            if self.resize_edges & Qt.Edge.TopEdge:
+                top = min(top + delta.y(), bottom - self.minimumHeight() + 1)
+            if self.resize_edges & Qt.Edge.BottomEdge:
+                bottom = max(bottom + delta.y(), top + self.minimumHeight() - 1)
+            self.setGeometry(left, top, right - left + 1, bottom - top + 1)
+            event.accept()
+            return
+        self.update_resize_cursor(self.edges_at(event.position().toPoint()))
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self.resize_origin:
+            self.resize_origin = None
+            self.resize_edges = Qt.Edge(0)
+            self.resize_geometry = None
+            self.persist_geometry()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        if not self.resize_origin:
+            self.unsetCursor()
+        super().leaveEvent(event)
 
     def restore_geometry(self) -> None:
         win = self.note["window"]
@@ -313,15 +460,32 @@ class StickyWindow(QWidget):
         fmt.setFontWeight(QFont.Weight.Normal if self.editor.fontWeight() > QFont.Weight.Normal else QFont.Weight.Bold)
         self.char_format(fmt)
 
+    def italic(self) -> None:
+        fmt = QTextCharFormat()
+        fmt.setFontItalic(not self.editor.fontItalic())
+        self.char_format(fmt)
+
     def underline(self) -> None:
         fmt = QTextCharFormat()
         fmt.setFontUnderline(not self.editor.fontUnderline())
         self.char_format(fmt)
 
-    def font_size(self) -> None:
+    def font_size(self, *_args) -> None:
         fmt = QTextCharFormat()
-        fmt.setFontPointSize(float(self.size_box.currentText()))
+        try:
+            size = max(8.0, min(96.0, float(self.size_box.currentText())))
+        except ValueError:
+            size = 16.0
+        fmt.setFontPointSize(size)
         self.char_format(fmt)
+
+    def adjust_font_size(self, delta: int) -> None:
+        current = self.editor.textCursor().charFormat().fontPointSize()
+        if current <= 0:
+            current = self.editor.fontPointSize() or 16
+        target = max(8, min(96, round(current + delta)))
+        self.size_box.setEditText(str(target))
+        self.font_size()
 
     def add_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "이미지 넣기", "", "이미지 (*.png *.jpg *.jpeg *.webp *.bmp)")
@@ -340,13 +504,15 @@ class StickyWindow(QWidget):
         bg = self.note.get("color", NOTE_COLORS[0])
         fg = text_color(bg)
         self.setStyleSheet(f"""
-            #stickyWindow {{ background: {bg}; border: 1px solid rgba(0,0,0,35); }}
+            #stickyWindow {{ background: transparent; }}
+            #stickySurface {{ background: {bg}; border: 1px solid rgba(0,0,0,28); border-radius: 18px; }}
             #stickyHeader, #stickyToolbar {{ background: transparent; }}
-            #stickyTitle {{ border: none; background: transparent; color: {fg}; font-size: 15px; font-weight: 700; padding: 2px; }}
-            #stickyEditor {{ border: none; background: transparent; color: {fg}; font-size: 16px; padding: 8px 13px; selection-background-color: rgba(50,90,180,90); }}
-            QToolButton {{ border: none; background: rgba(255,255,255,70); color: {fg}; border-radius: 7px; padding: 3px 7px; font-size: 10px; }}
+            #stickyToolbar {{ border-top: 1px solid rgba(0,0,0,18); border-bottom: 1px solid rgba(0,0,0,18); }}
+            #stickyTitle {{ border: none; background: transparent; color: {fg}; font-size: 15px; font-weight: 650; padding: 2px; }}
+            #stickyEditor {{ border: none; background: transparent; color: {fg}; font-size: 16px; padding: 9px 14px; selection-background-color: rgba(50,90,180,90); }}
+            QToolButton {{ border: none; background: rgba(255,255,255,48); color: {fg}; border-radius: 9px; padding: 3px 7px; font-size: 10px; }}
             QToolButton:hover {{ background: rgba(255,255,255,135); }}
-            QComboBox {{ border: none; background: rgba(255,255,255,80); color: {fg}; border-radius: 6px; padding: 3px; min-width: 44px; }}
+            QComboBox {{ border: none; background: rgba(255,255,255,62); color: {fg}; border-radius: 7px; padding: 3px; min-width: 44px; }}
             #stickySaved {{ color: {fg}; opacity: .6; font-size: 10px; }}
         """)
         self.color_btn.setStyleSheet(f"color: {bg}; background: {fg};")
@@ -430,7 +596,7 @@ class NotesWindow(QMainWindow):
         outer = QVBoxLayout(root); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
         top = QWidget(); top.setObjectName("topbar")
         top_row = QHBoxLayout(top); top_row.setContentsMargins(22, 14, 18, 14)
-        brand = QLabel("morrow"); brand.setObjectName("brand"); top_row.addWidget(brand); top_row.addStretch()
+        brand = QLabel("Memo"); brand.setObjectName("brand"); top_row.addWidget(brand); top_row.addStretch()
         top_row.addWidget(self.button("▣", "현재 메모를 스티키 창으로 열기", self.open_current_sticky))
         self.more_button = self.button("•••", "백업과 테마", self.more_menu)
         top_row.addWidget(self.more_button); outer.addWidget(top)
@@ -459,6 +625,7 @@ class NotesWindow(QMainWindow):
         toolbar = QWidget(); toolbar.setObjectName("toolbar"); tools = QHBoxLayout(toolbar); tools.setContentsMargins(8, 6, 8, 6); tools.setSpacing(2)
         tools.addWidget(self.button("B", "굵게", self.bold)); tools.addWidget(self.button("I", "기울임", self.italic)); tools.addWidget(self.button("U", "밑줄", self.underline))
         self.size_box = QComboBox(); self.size_box.addItems(["12", "14", "16", "18", "22", "28", "36", "48"]); self.size_box.setCurrentText("16"); self.size_box.activated.connect(self.font_size); tools.addWidget(self.size_box)
+        self.size_box.setEditable(True)
         tools.addWidget(self.button("L", "왼쪽 정렬", lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignLeft)))
         tools.addWidget(self.button("C", "가운데 정렬", lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignCenter)))
         tools.addWidget(self.button("R", "오른쪽 정렬", lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignRight)))
@@ -468,10 +635,17 @@ class NotesWindow(QMainWindow):
         self.status = QLabel("모든 변경사항은 자동으로 저장됩니다"); self.status.setObjectName("status"); body.addWidget(self.status)
         splitter.addWidget(content); splitter.setSizes([290, 770])
 
-        shortcuts = [("Ctrl+N", self.add_note), ("Ctrl+Shift+S", self.export_backup), ("Ctrl+Shift+O", self.import_backup), ("Ctrl+Shift+P", self.open_current_sticky)]
+        shortcuts = [
+            ("Ctrl+N", self.add_note), ("Ctrl+Shift+S", self.export_backup),
+            ("Ctrl+Shift+O", self.import_backup), ("Ctrl+Shift+P", self.open_current_sticky),
+            ("Ctrl+B", self.bold), ("Ctrl+I", self.italic), ("Ctrl+U", self.underline),
+            ("Ctrl+Shift+.", lambda: self.adjust_font_size(2)),
+            ("Ctrl+Shift+,", lambda: self.adjust_font_size(-2)),
+            ("Ctrl+]", lambda: self.adjust_font_size(2)),
+            ("Ctrl+[", lambda: self.adjust_font_size(-2)),
+        ]
         for keys, callback in shortcuts:
             action = self.addAction
-            from PySide6.QtGui import QAction
             shortcut = QAction(self); shortcut.setShortcut(QKeySequence(keys)); shortcut.triggered.connect(callback); action(shortcut)
 
     def apply_style(self) -> None:
@@ -587,8 +761,15 @@ class NotesWindow(QMainWindow):
         fmt = QTextCharFormat(); fmt.setFontItalic(not self.editor.fontItalic()); self.format_chars(fmt)
     def underline(self):
         fmt = QTextCharFormat(); fmt.setFontUnderline(not self.editor.fontUnderline()); self.format_chars(fmt)
-    def font_size(self):
-        fmt = QTextCharFormat(); fmt.setFontPointSize(float(self.size_box.currentText())); self.format_chars(fmt)
+    def font_size(self, *_args):
+        try: size = max(8.0, min(96.0, float(self.size_box.currentText())))
+        except ValueError: size = 16.0
+        fmt = QTextCharFormat(); fmt.setFontPointSize(size); self.format_chars(fmt)
+    def adjust_font_size(self, delta: int):
+        current = self.editor.textCursor().charFormat().fontPointSize()
+        if current <= 0: current = self.editor.fontPointSize() or 16
+        target = max(8, min(96, round(current + delta)))
+        self.size_box.setEditText(str(target)); self.font_size()
     def bullets(self):
         cursor = self.editor.textCursor(); current = cursor.currentList()
         if current:
@@ -666,7 +847,16 @@ class NotesWindow(QMainWindow):
 
 
 def main() -> int:
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Memo.Local.1")
+        except (AttributeError, OSError):
+            pass
     app = QApplication(sys.argv); app.setApplicationName(APP_NAME); app.setStyle("Fusion")
+    icon_file = asset_path("memo-icon.ico")
+    if icon_file.exists():
+        app.setWindowIcon(QIcon(str(icon_file)))
     window = NotesWindow(); window.show(); return app.exec()
 
 

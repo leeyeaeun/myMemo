@@ -2,9 +2,7 @@
 
 > I just wanted a simple notes app—ad-free, uncluttered, beautiful, and refined.
 
-Windows 스티커 메모처럼 가볍게 사용하는 로컬 전용 미니멀 메모 앱입니다.
-
-![Memo app icon](assets/memo-icon.png)
+로컬 전용 미니멀 메모 앱
 
 ## 실행
 

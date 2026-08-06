@@ -94,6 +94,142 @@ def pin_icon(color: str, active: bool = False) -> QIcon:
     return QIcon(pixmap)
 
 
+def plus_icon() -> QIcon:
+    pixmap = QPixmap(22, 22)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor("#FFFFFF"), 2.0)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    painter.drawLine(5, 11, 17, 11)
+    painter.drawLine(11, 5, 11, 17)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def note_color_icon(color: str) -> QIcon:
+    pixmap = QPixmap(16, 16)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(QColor("#9A9A94"), 1.3))
+    painter.setBrush(QColor(color))
+    painter.drawEllipse(2, 2, 12, 12)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def style_color_swatch(button: QToolButton, color: str) -> None:
+    button.setText("")
+    button.setFixedSize(24, 24)
+    button.setStyleSheet(f"""
+        QToolButton {{
+            background: {color};
+            border: 1px solid #858580;
+            border-radius: 7px;
+        }}
+        QToolButton:hover {{ border-color: #242426; }}
+    """)
+
+
+def format_icon(letter: str, style: str) -> QIcon:
+    pixmap = QPixmap(22, 22)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QColor("#202022"))
+    font = QFont("Segoe UI", 11)
+    font.setBold(style == "bold")
+    font.setItalic(style == "italic")
+    font.setUnderline(style == "underline")
+    font.setStrikeOut(style == "strike")
+    painter.setFont(font)
+    painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, letter)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def toolbar_icon(kind: str) -> QIcon:
+    pixmap = QPixmap(22, 22)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor("#202022"), 1.5)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    if kind == "list":
+        for y in (5, 11, 17):
+            painter.setBrush(QColor("#202022"))
+            painter.drawEllipse(2, y - 1, 2, 2)
+            painter.drawLine(7, y, 19, y)
+    elif kind == "numbered":
+        number_font = QFont("Segoe UI", 6)
+        number_font.setBold(True)
+        painter.setFont(number_font)
+        for number, y in zip(("1", "2", "3"), (7, 13, 19)):
+            painter.drawText(1, y, number)
+            painter.drawLine(7, y - 2, 19, y - 2)
+    elif kind.startswith("align_"):
+        widths = (16, 11, 14, 9)
+        for index, width in enumerate(widths):
+            y = 4 + index * 5
+            if kind == "align_left":
+                x = 3
+            elif kind == "align_center":
+                x = (22 - width) // 2
+            else:
+                x = 19 - width
+            painter.drawLine(x, y, x + width, y)
+    elif kind == "image":
+        painter.drawRoundedRect(3, 4, 16, 14, 2, 2)
+        painter.setBrush(QColor("#202022"))
+        painter.drawEllipse(6, 7, 2, 2)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawLine(5, 16, 10, 11)
+        painter.drawLine(10, 11, 13, 14)
+        painter.drawLine(13, 14, 16, 10)
+        painter.drawLine(16, 10, 18, 13)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def iconify(button: QToolButton, icon: QIcon) -> QToolButton:
+    button.setText("")
+    button.setIcon(icon)
+    button.setIconSize(QSize(20, 20))
+    button.setFixedSize(30, 30)
+    return button
+
+
+def toggle_text_list(editor: QTextEdit, style: QTextListFormat.Style) -> None:
+    cursor = editor.textCursor()
+    current = cursor.currentList()
+    if current and current.format().style() == style:
+        cursor.beginEditBlock()
+        blocks = [current.item(index) for index in range(current.count())]
+        for block in blocks:
+            current.remove(block)
+            block_cursor = QTextCursor(block)
+            block_format = block_cursor.blockFormat()
+            block_format.setIndent(0)
+            block_format.setObjectIndex(-1)
+            block_cursor.setBlockFormat(block_format)
+        cursor.endEditBlock()
+    elif current:
+        list_format = current.format()
+        list_format.setStyle(style)
+        list_format.setIndent(1)
+        current.setFormat(list_format)
+    else:
+        list_format = QTextListFormat()
+        list_format.setStyle(style)
+        list_format.setIndent(1)
+        cursor.createList(list_format)
+    editor.setFocus()
+
+
 def qimage_data_uri(image: QImage, image_format: str = "PNG") -> tuple[str, int, int] | None:
     if image.isNull():
         return None
@@ -246,7 +382,7 @@ class StickyWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setMouseTracking(True)
-        self.setMinimumSize(260, 240)
+        self.setMinimumSize(410, 240)
         self.build_ui()
         self.register_shortcuts()
         self.restore_geometry()
@@ -274,9 +410,22 @@ class StickyWindow(QWidget):
 
         self.header = QWidget()
         self.header.setObjectName("stickyHeader")
-        self.header.setFixedHeight(46)
+        self.header.setFixedHeight(52)
         row = QHBoxLayout(self.header)
-        row.setContentsMargins(13, 7, 7, 5)
+        row.setContentsMargins(12, 8, 7, 7)
+        self.dolphin_icon = QLabel()
+        self.dolphin_icon.setObjectName("stickyDolphinIcon")
+        self.dolphin_icon.setFixedSize(32, 32)
+        self.dolphin_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.dolphin_icon.setToolTip("Memo")
+        dolphin_pixmap = QPixmap(str(asset_path("memo-icon-mono.png")))
+        if not dolphin_pixmap.isNull():
+            self.dolphin_icon.setPixmap(dolphin_pixmap.scaled(
+                24, 24,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.FastTransformation,
+            ))
+        row.addWidget(self.dolphin_icon)
         self.title = QLineEdit(self.note.get("title", ""))
         self.title.setObjectName("stickyTitle")
         self.title.textChanged.connect(self.queue_save)
@@ -305,16 +454,22 @@ class StickyWindow(QWidget):
         self.size_box.setCurrentText("16")
         self.size_box.activated.connect(self.font_size)
         tools.addWidget(self.size_box)
-        tools.addWidget(self.button("•", "글머리표", self.bullets))
-        tools.addWidget(self.button("B", "굵게  Ctrl+B", self.bold))
-        tools.addWidget(self.button("I", "기울임  Ctrl+I", self.italic))
-        tools.addWidget(self.button("U", "밑줄  Ctrl+U", self.underline))
-        tools.addWidget(self.button("S", "취소선  Ctrl+Shift+X", self.strikeout))
-        tools.addWidget(self.button("L", "왼쪽 정렬", lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignLeft)))
-        tools.addWidget(self.button("C", "가운데 정렬", lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignCenter)))
-        tools.addWidget(self.button("R", "오른쪽 정렬", lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignRight)))
-        tools.addWidget(self.button("IMG", "이미지", self.add_image))
+        tools.addWidget(iconify(self.button("", "글머리표", self.bullets), toolbar_icon("list")))
+        tools.addWidget(iconify(self.button("", "번호 목록", self.numbered), toolbar_icon("numbered")))
+        tools.addWidget(iconify(self.button("", "굵게  Ctrl+B", self.bold), format_icon("B", "bold")))
+        tools.addWidget(iconify(self.button("", "기울임  Ctrl+I", self.italic), format_icon("I", "italic")))
+        tools.addWidget(iconify(self.button("", "밑줄  Ctrl+U", self.underline), format_icon("U", "underline")))
+        tools.addWidget(iconify(self.button("", "취소선  Ctrl+Shift+X", self.strikeout), format_icon("S", "strike")))
+        tools.addWidget(iconify(self.button("", "왼쪽 정렬", lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignLeft)), toolbar_icon("align_left")))
+        tools.addWidget(iconify(self.button("", "가운데 정렬", lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignCenter)), toolbar_icon("align_center")))
+        tools.addWidget(iconify(self.button("", "오른쪽 정렬", lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignRight)), toolbar_icon("align_right")))
+        tools.addWidget(iconify(self.button("", "이미지", self.add_image), toolbar_icon("image")))
         tools.addStretch()
+        tools.addWidget(self.button("↶", "실행 취소  Ctrl+Z", lambda: self.editor.undo()))
+        tools.addWidget(self.button("↷", "다시 실행  Ctrl+Y", lambda: self.editor.redo()))
+        for tool_button in self.toolbar.findChildren(QToolButton):
+            tool_button.setFixedSize(24, 26)
+            tool_button.setIconSize(QSize(17, 17))
         surface_layout.addWidget(self.toolbar)
 
         self.editor = RichEditor()
@@ -541,18 +696,10 @@ class StickyWindow(QWidget):
         self.font_size()
 
     def bullets(self) -> None:
-        cursor = self.editor.textCursor()
-        current = cursor.currentList()
-        if current:
-            block = cursor.blockFormat()
-            block.setIndent(0)
-            cursor.setBlockFormat(block)
-        else:
-            fmt = QTextListFormat()
-            fmt.setStyle(QTextListFormat.Style.ListDisc)
-            fmt.setIndent(1)
-            cursor.createList(fmt)
-        self.editor.setFocus()
+        toggle_text_list(self.editor, QTextListFormat.Style.ListDisc)
+
+    def numbered(self) -> None:
+        toggle_text_list(self.editor, QTextListFormat.Style.ListDecimal)
 
     def add_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "이미지 넣기", "", "이미지 (*.png *.jpg *.jpeg *.webp *.bmp)")
@@ -581,19 +728,23 @@ class StickyWindow(QWidget):
     def refresh_style(self) -> None:
         bg = self.note.get("color", NOTE_COLORS[0])
         fg = text_color(bg)
+        base_color = QColor(bg)
+        header_bg = base_color.darker(109).name()
+        header_border = base_color.darker(122).name()
         self.setStyleSheet(f"""
             #stickyWindow {{ background: transparent; }}
             #stickySurface {{ background: {bg}; border: 1px solid rgba(0,0,0,28); border-radius: 18px; }}
-            #stickyHeader, #stickyToolbar {{ background: transparent; }}
-            #stickyToolbar {{ border-top: 1px solid rgba(0,0,0,18); border-bottom: 1px solid rgba(0,0,0,18); }}
-            #stickyTitle {{ border: none; background: transparent; color: {fg}; font-size: 15px; font-weight: 650; padding: 2px; }}
+            #stickyHeader {{ background: {header_bg}; border-bottom: 1px solid {header_border}; border-top-left-radius: 17px; border-top-right-radius: 17px; }}
+            #stickyToolbar {{ background: rgba(255,255,255,24); border-bottom: 1px solid rgba(0,0,0,20); }}
+            #stickyDolphinIcon {{ background: rgba(255,255,255,105); border: 1px solid rgba(255,255,255,135); border-radius: 10px; }}
+            #stickyTitle {{ border: none; background: transparent; color: {fg}; font-size: 16px; font-weight: 700; padding: 2px 5px; }}
             #stickyEditor {{ border: none; background: transparent; color: {fg}; font-size: 16px; padding: 9px 14px; selection-background-color: rgba(50,90,180,90); }}
             QToolButton {{ border: none; background: rgba(255,255,255,48); color: {fg}; border-radius: 9px; padding: 3px 7px; font-size: 10px; }}
             QToolButton:hover {{ background: rgba(255,255,255,135); }}
             QComboBox {{ border: none; background: rgba(255,255,255,62); color: {fg}; border-radius: 7px; padding: 3px; min-width: 44px; }}
             #stickySaved {{ color: {fg}; opacity: .6; font-size: 10px; }}
         """)
-        self.color_btn.setStyleSheet(f"color: {bg}; background: {fg};")
+        style_color_swatch(self.color_btn, bg)
         self.refresh_pin_icon()
 
     def refresh_pin_icon(self) -> None:
@@ -684,6 +835,11 @@ class NotesWindow(QMainWindow):
         outer = QVBoxLayout(root); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
         top = QWidget(); top.setObjectName("topbar")
         top_row = QHBoxLayout(top); top_row.setContentsMargins(22, 14, 18, 14)
+        self.main_brand_icon = QLabel(); self.main_brand_icon.setObjectName("mainBrandIcon"); self.main_brand_icon.setFixedSize(34, 34); self.main_brand_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mono_pixmap = QPixmap(str(asset_path("memo-icon-mono.png")))
+        if not mono_pixmap.isNull():
+            self.main_brand_icon.setPixmap(mono_pixmap.scaled(26, 26, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation))
+        top_row.addWidget(self.main_brand_icon)
         brand = QLabel("Memo"); brand.setObjectName("brand"); top_row.addWidget(brand); top_row.addStretch()
         top_row.addWidget(self.button("▣", "현재 메모를 스티키 창으로 열기", self.open_current_sticky))
         self.more_button = self.button("•••", "백업과 테마", self.more_menu)
@@ -694,10 +850,10 @@ class NotesWindow(QMainWindow):
         side = QVBoxLayout(sidebar); side.setContentsMargins(18, 18, 14, 18); side.setSpacing(12)
         head = QHBoxLayout(); title = QLabel("모든 메모"); title.setObjectName("sectionTitle")
         self.count = QLabel(); self.count.setObjectName("count")
-        add = QPushButton("+"); add.setObjectName("addButton"); add.clicked.connect(self.add_note)
+        add = QToolButton(); add.setObjectName("addButton"); add.setFixedSize(42, 42); add.setIcon(plus_icon()); add.setIconSize(QSize(22, 22)); add.setToolTip("새 메모  Ctrl+N"); add.clicked.connect(self.add_note)
         head.addWidget(title); head.addWidget(self.count); head.addStretch(); head.addWidget(add); side.addLayout(head)
         self.search = QLineEdit(); self.search.setPlaceholderText("메모 검색"); self.search.setClearButtonEnabled(True); self.search.textChanged.connect(self.refresh_list); side.addWidget(self.search)
-        self.list = ReorderableNoteList(); self.list.setObjectName("noteList"); self.list.setSpacing(7); self.list.setFrameShape(QFrame.Shape.NoFrame)
+        self.list = ReorderableNoteList(); self.list.setObjectName("noteList"); self.list.setSpacing(8); self.list.setFrameShape(QFrame.Shape.NoFrame); self.list.setIconSize(QSize(16, 16))
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.currentItemChanged.connect(self.select_note); self.list.itemDoubleClicked.connect(lambda _: self.open_current_sticky())
         self.list.customContextMenuRequested.connect(self.list_context_menu); self.list.order_changed.connect(self.persist_list_order); side.addWidget(self.list, 1)
@@ -709,17 +865,19 @@ class NotesWindow(QMainWindow):
         title_row = QHBoxLayout(); self.title_edit = QLineEdit(); self.title_edit.setObjectName("titleEdit"); self.title_edit.textChanged.connect(self.queue_save)
         title_row.addWidget(self.title_edit, 1)
         self.sticky_btn = self.button("▣", "스티키 창으로 열기", self.open_current_sticky)
-        self.color_btn = self.button("●", "메모 색상", self.color_menu)
+        self.color_btn = self.button("", "메모 색상", self.color_menu)
         title_row.addWidget(self.sticky_btn); title_row.addWidget(self.color_btn); title_row.addWidget(self.button("⌫", "메모 삭제", self.delete_note)); body.addLayout(title_row)
 
         toolbar = QWidget(); toolbar.setObjectName("toolbar"); tools = QHBoxLayout(toolbar); tools.setContentsMargins(8, 6, 8, 6); tools.setSpacing(2)
-        tools.addWidget(self.button("B", "굵게", self.bold)); tools.addWidget(self.button("I", "기울임", self.italic)); tools.addWidget(self.button("U", "밑줄", self.underline)); tools.addWidget(self.button("S", "취소선", self.strikeout))
         self.size_box = QComboBox(); self.size_box.addItems(["12", "14", "16", "18", "22", "28", "36", "48"]); self.size_box.setCurrentText("16"); self.size_box.activated.connect(self.font_size); tools.addWidget(self.size_box)
         self.size_box.setEditable(True)
-        tools.addWidget(self.button("L", "왼쪽 정렬", lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignLeft)))
-        tools.addWidget(self.button("C", "가운데 정렬", lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignCenter)))
-        tools.addWidget(self.button("R", "오른쪽 정렬", lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignRight)))
-        tools.addWidget(self.button("•", "글머리표", self.bullets)); tools.addWidget(self.button("IMG", "이미지 삽입", self.add_image, 44)); tools.addStretch()
+        tools.addWidget(iconify(self.button("", "글머리표", self.bullets), toolbar_icon("list")))
+        tools.addWidget(iconify(self.button("", "번호 목록", self.numbered), toolbar_icon("numbered")))
+        tools.addWidget(iconify(self.button("", "굵게  Ctrl+B", self.bold), format_icon("B", "bold"))); tools.addWidget(iconify(self.button("", "기울임  Ctrl+I", self.italic), format_icon("I", "italic"))); tools.addWidget(iconify(self.button("", "밑줄  Ctrl+U", self.underline), format_icon("U", "underline"))); tools.addWidget(iconify(self.button("", "취소선  Ctrl+Shift+X", self.strikeout), format_icon("S", "strike")))
+        tools.addWidget(iconify(self.button("", "왼쪽 정렬", lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignLeft)), toolbar_icon("align_left")))
+        tools.addWidget(iconify(self.button("", "가운데 정렬", lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignCenter)), toolbar_icon("align_center")))
+        tools.addWidget(iconify(self.button("", "오른쪽 정렬", lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignRight)), toolbar_icon("align_right")))
+        tools.addWidget(iconify(self.button("", "이미지 삽입", self.add_image, 44), toolbar_icon("image"))); tools.addStretch()
         tools.addWidget(self.button("↶", "실행 취소", lambda: self.editor.undo())); tools.addWidget(self.button("↷", "다시 실행", lambda: self.editor.redo())); body.addWidget(toolbar)
         self.editor = RichEditor(); self.editor.setObjectName("editor"); self.editor.textChanged.connect(self.queue_save); self.editor.image_resize_requested.connect(lambda: resize_image(self, self.editor)); body.addWidget(self.editor, 1)
         self.status = QLabel("모든 변경사항은 자동으로 저장됩니다"); self.status.setObjectName("status"); body.addWidget(self.status)
@@ -745,12 +903,16 @@ class NotesWindow(QMainWindow):
             QMainWindow, #root, #content { background: #FCFCFB; }
             #topbar { background: white; border-bottom: 1px solid #E8E8E5; }
             #brand { font-size: 20px; font-weight: 700; letter-spacing: 1px; }
+            #mainBrandIcon { background: #F3F3F0; border: 1px solid #E1E1DD; border-radius: 11px; }
             #sidebar { background: #F4F4F1; border-right: 1px solid #E5E5E1; }
             #sectionTitle { font-size: 17px; font-weight: 650; } #count, #hint, #status { color: #92928E; font-size: 11px; }
-            #addButton { border: none; background: #1D1D1F; color: white; border-radius: 15px; width: 30px; height: 30px; font-size: 18px; }
+            #addButton { border: none; background: #1D1D1F; color: white; border-radius: 21px; }
+            #addButton:hover { background: #343436; }
+            #addButton:pressed { background: #050505; }
             QLineEdit { border: 1px solid #E2E2DE; background: white; border-radius: 11px; padding: 9px 12px; }
             #noteList { background: transparent; outline: none; }
-            #noteList::item { background: white; border: 1px solid #E8E8E4; border-radius: 13px; padding: 11px 12px; margin: 0 1px; }
+            #noteList::item { background: white; border: 1px solid #D8D8D3; border-radius: 14px; padding: 12px 13px; margin: 1px; }
+            #noteList::item:hover { border-color: #BDBDB7; background: #FAFAF8; }
             #noteList::item:selected { background: #222223; color: white; border-color: #222223; }
             #noteList::indicator { background: #1D1D1F; height: 3px; border-radius: 1px; }
             #titleEdit { border: none; background: transparent; padding: 4px 2px; font-size: 25px; font-weight: 700; }
@@ -771,6 +933,7 @@ class NotesWindow(QMainWindow):
             if query and query not in f"{note.get('title', '')} {preview}".lower(): continue
             marker = "  ·  열림" if note["window"].get("open") else ""
             item = QListWidgetItem(f"{note.get('title') or '제목 없음'}{marker}\n{preview[:45] or '내용 없음'}")
+            item.setIcon(note_color_icon(note["color"]))
             item.setData(Qt.ItemDataRole.UserRole, note["id"]); item.setSizeHint(QSize(230, 65)); item.setForeground(QColor(text_color(note["color"])))
             item.setBackground(QColor(note["color"])); self.list.addItem(item)
             if note["id"] == wanted: self.list.setCurrentItem(item); selected = item
@@ -785,7 +948,7 @@ class NotesWindow(QMainWindow):
         note = self.store.by_id(next_id)
         if not note: return
         self.loading = True; self.current_id = next_id; self.title_edit.setText(note["title"]); self.editor.setHtml(note["html"]); self.editor.moveCursor(QTextCursor.MoveOperation.Start)
-        self.color_btn.setStyleSheet(f"color: {note['color']}; font-size: 19px;"); self.loading = False
+        style_color_swatch(self.color_btn, note["color"]); self.loading = False
 
     def queue_save(self) -> None:
         if self.loading or not self.current_id: return
@@ -917,11 +1080,9 @@ class NotesWindow(QMainWindow):
         target = max(8, min(96, round(current + delta)))
         self.size_box.setEditText(str(target)); self.font_size()
     def bullets(self):
-        cursor = self.editor.textCursor(); current = cursor.currentList()
-        if current:
-            block = cursor.blockFormat(); block.setIndent(0); cursor.setBlockFormat(block)
-        else:
-            fmt = QTextListFormat(); fmt.setStyle(QTextListFormat.Style.ListDisc); cursor.createList(fmt)
+        toggle_text_list(self.editor, QTextListFormat.Style.ListDisc)
+    def numbered(self):
+        toggle_text_list(self.editor, QTextListFormat.Style.ListDecimal)
     def add_image(self):
         path, _ = QFileDialog.getOpenFileName(self, "이미지 넣기", "", "이미지 (*.png *.jpg *.jpeg *.webp *.bmp)")
         if path: self.editor.insert_image_file(path)
@@ -929,7 +1090,7 @@ class NotesWindow(QMainWindow):
     def set_note_color(self, color: str) -> None:
         note = self.store.by_id(self.current_id)
         if not note: return
-        note["color"] = color; self.color_btn.setStyleSheet(f"color: {color}; font-size: 19px;"); self.store.save()
+        note["color"] = color; style_color_swatch(self.color_btn, color); self.store.save()
         sticky = self.stickies.get(note["id"])
         if sticky: sticky.refresh_style()
         self.refresh_list(select_id=note["id"])
@@ -950,7 +1111,7 @@ class NotesWindow(QMainWindow):
         for index, note in enumerate(self.store.notes):
             note["color"] = colors[index % len(colors)]
             if note["id"] in self.stickies: self.stickies[note["id"]].refresh_style()
-        self.store.save(); self.refresh_list(select_id=self.current_id); self.color_btn.setStyleSheet(f"color: {self.store.by_id(self.current_id)['color']}; font-size: 19px;")
+        self.store.save(); self.refresh_list(select_id=self.current_id); style_color_swatch(self.color_btn, self.store.by_id(self.current_id)["color"])
         self.status.setText("전체 메모 테마를 변경했습니다")
 
     def more_menu(self) -> None:

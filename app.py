@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from PySide6.QtCore import QBuffer, QByteArray, QEvent, QIODevice, QPoint, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QImage, QTextCharFormat, QTextCursor, QTextImageFormat, QTextListFormat
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QImage, QPainter, QPen, QPixmap, QTextCharFormat, QTextCursor, QTextImageFormat, QTextListFormat
 from PySide6.QtWidgets import (
     QApplication, QColorDialog, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout,
     QGraphicsDropShadowEffect, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
@@ -76,6 +76,24 @@ def text_color(background: str) -> str:
     return "#202020" if luminance > 150 else "#FFFFFF"
 
 
+def pin_icon(color: str, active: bool = False) -> QIcon:
+    pixmap = QPixmap(22, 22)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pin_color = QColor("#D65345") if active else QColor(color)
+    pen = QPen(pin_color, 1.8)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(pin_color if active else Qt.BrushStyle.NoBrush)
+    painter.drawRoundedRect(7, 3, 8, 7, 2, 2)
+    painter.drawLine(5, 10, 17, 10)
+    painter.drawLine(11, 10, 11, 19)
+    painter.end()
+    return QIcon(pixmap)
+
+
 def qimage_data_uri(image: QImage, image_format: str = "PNG") -> tuple[str, int, int] | None:
     if image.isNull():
         return None
@@ -108,6 +126,10 @@ class Store:
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             self.notes = []
         self.notes = [normalize_note(n) for n in self.notes if isinstance(n, dict)]
+        if any(isinstance(n.get("order"), int) for n in self.notes):
+            self.notes.sort(key=lambda n: n.get("order", len(self.notes)))
+        else:
+            self.notes.sort(key=lambda n: n.get("updated_at", ""), reverse=True)
         if not self.notes:
             note = new_note()
             note.update(title="첫 번째 메모", html="<p>여기에 가볍게 기록해 보세요.</p>")
@@ -115,6 +137,8 @@ class Store:
             self.save()
 
     def save(self) -> None:
+        for index, note in enumerate(self.notes):
+            note["order"] = index
         payload = {"version": 2, "app": APP_NAME, "notes": self.notes}
         temp = self.path.with_suffix(".tmp")
         temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -180,10 +204,29 @@ class RichEditor(QTextEdit):
         super().insertFromMimeData(source)
 
 
+class ReorderableNoteList(QListWidget):
+    order_changed = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+
+    def dropEvent(self, event) -> None:
+        super().dropEvent(event)
+        if event.isAccepted():
+            self.order_changed.emit()
+
+
 class StickyWindow(QWidget):
     changed = Signal(str)
     closed = Signal(str)
-    RESIZE_MARGIN = 11
+    delete_requested = Signal(str)
+    manager_requested = Signal()
+    RESIZE_MARGIN = 22
 
     def __init__(self, note: dict, save_callback) -> None:
         super().__init__(None, Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
@@ -213,7 +256,7 @@ class StickyWindow(QWidget):
     def build_ui(self) -> None:
         self.setObjectName("stickyWindow")
         root = QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
+        root.setContentsMargins(18, 18, 18, 18)
         root.setSpacing(0)
 
         self.surface = QFrame()
@@ -238,37 +281,41 @@ class StickyWindow(QWidget):
         self.title.setObjectName("stickyTitle")
         self.title.textChanged.connect(self.queue_save)
         row.addWidget(self.title, 1)
-        self.format_btn = self.button("Aa", "서식 도구", self.toggle_toolbar)
-        self.pin_btn = self.button("PIN", "항상 위 고정", self.toggle_pin)
+        self.manager_btn = self.button("☰", "전체 메모 보기", self.manager_requested.emit)
+        self.pin_btn = self.button("", "항상 위 고정", self.toggle_pin)
+        self.pin_btn.setIconSize(QSize(20, 20))
         self.color_btn = self.button("●", "색상 변경", self.choose_color)
+        self.delete_btn = self.button("⌫", "메모 삭제", self.request_delete)
         self.close_btn = self.button("×", "메모 창 닫기", self.close)
-        row.addWidget(self.format_btn)
+        row.addWidget(self.manager_btn)
         row.addWidget(self.pin_btn)
         row.addWidget(self.color_btn)
+        row.addWidget(self.delete_btn)
         row.addWidget(self.close_btn)
         surface_layout.addWidget(self.header)
 
         self.toolbar = QWidget()
         self.toolbar.setObjectName("stickyToolbar")
         tools = QHBoxLayout(self.toolbar)
-        tools.setContentsMargins(9, 3, 9, 5)
+        tools.setContentsMargins(9, 5, 9, 6)
         tools.setSpacing(1)
-        tools.addWidget(self.button("B", "굵게  Ctrl+B", self.bold))
-        tools.addWidget(self.button("I", "기울임  Ctrl+I", self.italic))
-        tools.addWidget(self.button("U", "밑줄  Ctrl+U", self.underline))
         self.size_box = QComboBox()
         self.size_box.addItems(["12", "14", "16", "18", "22", "28", "36"])
         self.size_box.setEditable(True)
         self.size_box.setCurrentText("16")
         self.size_box.activated.connect(self.font_size)
         tools.addWidget(self.size_box)
+        tools.addWidget(self.button("•", "글머리표", self.bullets))
+        tools.addWidget(self.button("B", "굵게  Ctrl+B", self.bold))
+        tools.addWidget(self.button("I", "기울임  Ctrl+I", self.italic))
+        tools.addWidget(self.button("U", "밑줄  Ctrl+U", self.underline))
+        tools.addWidget(self.button("S", "취소선  Ctrl+Shift+X", self.strikeout))
         tools.addWidget(self.button("L", "왼쪽 정렬", lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignLeft)))
         tools.addWidget(self.button("C", "가운데 정렬", lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignCenter)))
         tools.addWidget(self.button("R", "오른쪽 정렬", lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignRight)))
         tools.addWidget(self.button("IMG", "이미지", self.add_image))
         tools.addStretch()
         surface_layout.addWidget(self.toolbar)
-        self.toolbar.hide()
 
         self.editor = RichEditor()
         self.editor.setObjectName("stickyEditor")
@@ -283,7 +330,10 @@ class StickyWindow(QWidget):
         self.saved.setObjectName("stickySaved")
         bottom.addWidget(self.saved)
         bottom.addStretch()
-        bottom.addWidget(QSizeGrip(self.surface))
+        self.size_grip = QSizeGrip(self.surface)
+        self.size_grip.setFixedSize(28, 28)
+        self.size_grip.setToolTip("드래그해서 메모 크기 조절")
+        bottom.addWidget(self.size_grip)
         surface_layout.addLayout(bottom)
 
         self.header.installEventFilter(self)
@@ -294,6 +344,7 @@ class StickyWindow(QWidget):
             ("Ctrl+B", self.bold),
             ("Ctrl+I", self.italic),
             ("Ctrl+U", self.underline),
+            ("Ctrl+Shift+X", self.strikeout),
             ("Ctrl+Shift+.", lambda: self.adjust_font_size(2)),
             ("Ctrl+Shift+,", lambda: self.adjust_font_size(-2)),
             ("Ctrl+]", lambda: self.adjust_font_size(2)),
@@ -445,9 +496,6 @@ class StickyWindow(QWidget):
         self.refresh_style()
         self.loading = False
 
-    def toggle_toolbar(self) -> None:
-        self.toolbar.setVisible(not self.toolbar.isVisible())
-
     def char_format(self, fmt: QTextCharFormat) -> None:
         cursor = self.editor.textCursor()
         if not cursor.hasSelection():
@@ -470,6 +518,11 @@ class StickyWindow(QWidget):
         fmt.setFontUnderline(not self.editor.fontUnderline())
         self.char_format(fmt)
 
+    def strikeout(self) -> None:
+        fmt = QTextCharFormat()
+        fmt.setFontStrikeOut(not self.editor.currentCharFormat().fontStrikeOut())
+        self.char_format(fmt)
+
     def font_size(self, *_args) -> None:
         fmt = QTextCharFormat()
         try:
@@ -487,6 +540,20 @@ class StickyWindow(QWidget):
         self.size_box.setEditText(str(target))
         self.font_size()
 
+    def bullets(self) -> None:
+        cursor = self.editor.textCursor()
+        current = cursor.currentList()
+        if current:
+            block = cursor.blockFormat()
+            block.setIndent(0)
+            cursor.setBlockFormat(block)
+        else:
+            fmt = QTextListFormat()
+            fmt.setStyle(QTextListFormat.Style.ListDisc)
+            fmt.setIndent(1)
+            cursor.createList(fmt)
+        self.editor.setFocus()
+
     def add_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "이미지 넣기", "", "이미지 (*.png *.jpg *.jpeg *.webp *.bmp)")
         if path:
@@ -499,6 +566,17 @@ class StickyWindow(QWidget):
             self.refresh_style()
             self.save_callback()
             self.changed.emit(self.note["id"])
+
+    def request_delete(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "메모 삭제",
+            f"‘{self.note.get('title') or '제목 없음'}’ 메모를 삭제할까요?",
+            QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.delete_requested.emit(self.note["id"])
 
     def refresh_style(self) -> None:
         bg = self.note.get("color", NOTE_COLORS[0])
@@ -516,13 +594,23 @@ class StickyWindow(QWidget):
             #stickySaved {{ color: {fg}; opacity: .6; font-size: 10px; }}
         """)
         self.color_btn.setStyleSheet(f"color: {bg}; background: {fg};")
+        self.refresh_pin_icon()
+
+    def refresh_pin_icon(self) -> None:
+        pinned = bool(self.note["window"].get("pinned", False))
+        fg = text_color(self.note.get("color", NOTE_COLORS[0]))
+        self.pin_btn.setIcon(pin_icon(fg, pinned))
+        self.pin_btn.setToolTip("항상 위 고정 해제" if pinned else "항상 위에 고정")
 
     def apply_pin(self, pinned: bool) -> None:
+        was_visible = self.isVisible()
         self.note["window"]["pinned"] = pinned
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, pinned)
-        self.pin_btn.setText("TOP" if pinned else "PIN")
-        if self.isVisible():
+        self.refresh_pin_icon()
+        if was_visible:
             self.show()
+            self.raise_()
+            self.activateWindow()
 
     def toggle_pin(self) -> None:
         self.apply_pin(not bool(self.note["window"].get("pinned")))
@@ -609,9 +697,11 @@ class NotesWindow(QMainWindow):
         add = QPushButton("+"); add.setObjectName("addButton"); add.clicked.connect(self.add_note)
         head.addWidget(title); head.addWidget(self.count); head.addStretch(); head.addWidget(add); side.addLayout(head)
         self.search = QLineEdit(); self.search.setPlaceholderText("메모 검색"); self.search.setClearButtonEnabled(True); self.search.textChanged.connect(self.refresh_list); side.addWidget(self.search)
-        self.list = QListWidget(); self.list.setObjectName("noteList"); self.list.setSpacing(7); self.list.setFrameShape(QFrame.Shape.NoFrame)
-        self.list.currentItemChanged.connect(self.select_note); self.list.itemDoubleClicked.connect(lambda _: self.open_current_sticky()); side.addWidget(self.list, 1)
-        hint = QLabel("더블 클릭하면 바탕화면 메모로 열립니다"); hint.setObjectName("hint"); hint.setWordWrap(True); side.addWidget(hint)
+        self.list = ReorderableNoteList(); self.list.setObjectName("noteList"); self.list.setSpacing(7); self.list.setFrameShape(QFrame.Shape.NoFrame)
+        self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list.currentItemChanged.connect(self.select_note); self.list.itemDoubleClicked.connect(lambda _: self.open_current_sticky())
+        self.list.customContextMenuRequested.connect(self.list_context_menu); self.list.order_changed.connect(self.persist_list_order); side.addWidget(self.list, 1)
+        hint = QLabel("드래그로 순서 변경 · 더블 클릭으로 스티키 열기"); hint.setObjectName("hint"); hint.setWordWrap(True); side.addWidget(hint)
         splitter.addWidget(sidebar)
 
         content = QWidget(); content.setObjectName("content")
@@ -623,7 +713,7 @@ class NotesWindow(QMainWindow):
         title_row.addWidget(self.sticky_btn); title_row.addWidget(self.color_btn); title_row.addWidget(self.button("⌫", "메모 삭제", self.delete_note)); body.addLayout(title_row)
 
         toolbar = QWidget(); toolbar.setObjectName("toolbar"); tools = QHBoxLayout(toolbar); tools.setContentsMargins(8, 6, 8, 6); tools.setSpacing(2)
-        tools.addWidget(self.button("B", "굵게", self.bold)); tools.addWidget(self.button("I", "기울임", self.italic)); tools.addWidget(self.button("U", "밑줄", self.underline))
+        tools.addWidget(self.button("B", "굵게", self.bold)); tools.addWidget(self.button("I", "기울임", self.italic)); tools.addWidget(self.button("U", "밑줄", self.underline)); tools.addWidget(self.button("S", "취소선", self.strikeout))
         self.size_box = QComboBox(); self.size_box.addItems(["12", "14", "16", "18", "22", "28", "36", "48"]); self.size_box.setCurrentText("16"); self.size_box.activated.connect(self.font_size); tools.addWidget(self.size_box)
         self.size_box.setEditable(True)
         tools.addWidget(self.button("L", "왼쪽 정렬", lambda: self.editor.setAlignment(Qt.AlignmentFlag.AlignLeft)))
@@ -639,6 +729,7 @@ class NotesWindow(QMainWindow):
             ("Ctrl+N", self.add_note), ("Ctrl+Shift+S", self.export_backup),
             ("Ctrl+Shift+O", self.import_backup), ("Ctrl+Shift+P", self.open_current_sticky),
             ("Ctrl+B", self.bold), ("Ctrl+I", self.italic), ("Ctrl+U", self.underline),
+            ("Ctrl+Shift+X", self.strikeout),
             ("Ctrl+Shift+.", lambda: self.adjust_font_size(2)),
             ("Ctrl+Shift+,", lambda: self.adjust_font_size(-2)),
             ("Ctrl+]", lambda: self.adjust_font_size(2)),
@@ -661,6 +752,7 @@ class NotesWindow(QMainWindow):
             #noteList { background: transparent; outline: none; }
             #noteList::item { background: white; border: 1px solid #E8E8E4; border-radius: 13px; padding: 11px 12px; margin: 0 1px; }
             #noteList::item:selected { background: #222223; color: white; border-color: #222223; }
+            #noteList::indicator { background: #1D1D1F; height: 3px; border-radius: 1px; }
             #titleEdit { border: none; background: transparent; padding: 4px 2px; font-size: 25px; font-weight: 700; }
             #toolbar { background: #F2F2EF; border: 1px solid #E4E4E0; border-radius: 13px; }
             QToolButton { border: none; background: transparent; border-radius: 8px; font-size: 12px; }
@@ -674,7 +766,7 @@ class NotesWindow(QMainWindow):
     def refresh_list(self, _text="", select_id=None) -> None:
         wanted = select_id or self.current_id; query = self.search.text().strip().lower(); selected = None
         self.list.blockSignals(True); self.list.clear()
-        for note in sorted(self.store.notes, key=lambda n: n.get("updated_at", ""), reverse=True):
+        for note in self.store.notes:
             doc = QTextEdit(); doc.setHtml(note.get("html", "")); preview = " ".join(doc.toPlainText().split())
             if query and query not in f"{note.get('title', '')} {preview}".lower(): continue
             marker = "  ·  열림" if note["window"].get("open") else ""
@@ -726,10 +818,52 @@ class NotesWindow(QMainWindow):
         if existing: existing.show(); existing.raise_(); existing.activateWindow(); return
         note["window"]["open"] = True
         sticky = StickyWindow(note, self.save_store); sticky.changed.connect(self.sticky_changed); sticky.closed.connect(self.sticky_closed)
+        sticky.delete_requested.connect(lambda note_id: self.delete_note_by_id(note_id, confirm=False))
+        sticky.manager_requested.connect(self.show_manager)
         self.stickies[note["id"]] = sticky; self.store.save(); sticky.show(); sticky.raise_(); self.refresh_list(select_id=note["id"])
 
     def sticky_closed(self, note_id: str) -> None:
         self.stickies.pop(note_id, None); self.refresh_list(select_id=self.current_id)
+
+    def show_manager(self) -> None:
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def list_context_menu(self, pos) -> None:
+        item = self.list.itemAt(pos)
+        if not item:
+            return
+        self.list.setCurrentItem(item)
+        menu = QMenu(self)
+        open_action = menu.addAction("스티키 메모로 열기")
+        menu.addSeparator()
+        delete_action = menu.addAction("메모 삭제…")
+        selected = menu.exec(self.list.mapToGlobal(pos))
+        if selected == open_action:
+            self.open_current_sticky()
+        elif selected == delete_action:
+            self.delete_note()
+
+    def persist_list_order(self) -> None:
+        visible_ids = [self.list.item(row).data(Qt.ItemDataRole.UserRole) for row in range(self.list.count())]
+        if not visible_ids:
+            return
+        reordered = iter(visible_ids)
+        visible_set = set(visible_ids)
+        by_id = {note["id"]: note for note in self.store.notes}
+        new_order = []
+        for note in self.store.notes:
+            if note["id"] in visible_set:
+                new_order.append(by_id[next(reordered)])
+            else:
+                new_order.append(note)
+        self.store.notes = new_order
+        self.store.save()
+        self.status.setText("메모 순서를 저장했습니다")
 
     def restore_stickies(self) -> None:
         for note in self.store.notes:
@@ -738,12 +872,22 @@ class NotesWindow(QMainWindow):
         self.refresh_list(select_id=self.current_id)
 
     def add_note(self) -> None:
-        self.save_current(False); note = new_note(NOTE_COLORS[len(self.store.notes) % len(NOTE_COLORS)]); self.store.notes.append(note); self.store.save(); self.search.clear(); self.refresh_list(select_id=note["id"]); self.title_edit.selectAll(); self.title_edit.setFocus()
+        self.save_current(False); note = new_note(NOTE_COLORS[len(self.store.notes) % len(NOTE_COLORS)]); self.store.notes.insert(0, note); self.store.save(); self.search.clear(); self.refresh_list(select_id=note["id"]); self.title_edit.selectAll(); self.title_edit.setFocus()
 
     def delete_note(self) -> None:
-        note = self.store.by_id(self.current_id)
+        self.delete_note_by_id(self.current_id, confirm=True)
+
+    def delete_note_by_id(self, note_id: str | None, confirm: bool = True) -> None:
+        note = self.store.by_id(note_id)
         if not note: return
-        if QMessageBox.question(self, "메모 삭제", f"‘{note['title']}’ 메모를 삭제할까요?", QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes) != QMessageBox.StandardButton.Yes: return
+        if confirm and QMessageBox.question(
+            self,
+            "메모 삭제",
+            f"‘{note['title']}’ 메모를 삭제할까요?",
+            QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
+            QMessageBox.StandardButton.Cancel,
+        ) != QMessageBox.StandardButton.Yes:
+            return
         sticky = self.stickies.pop(note["id"], None)
         if sticky: sticky.close()
         self.store.notes = [n for n in self.store.notes if n["id"] != note["id"]]
@@ -761,6 +905,8 @@ class NotesWindow(QMainWindow):
         fmt = QTextCharFormat(); fmt.setFontItalic(not self.editor.fontItalic()); self.format_chars(fmt)
     def underline(self):
         fmt = QTextCharFormat(); fmt.setFontUnderline(not self.editor.fontUnderline()); self.format_chars(fmt)
+    def strikeout(self):
+        fmt = QTextCharFormat(); fmt.setFontStrikeOut(not self.editor.currentCharFormat().fontStrikeOut()); self.format_chars(fmt)
     def font_size(self, *_args):
         try: size = max(8.0, min(96.0, float(self.size_box.currentText())))
         except ValueError: size = 16.0
@@ -840,6 +986,17 @@ class NotesWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self.save_timer.stop(); self.save_current(False)
+        pinned_stickies = [
+            sticky for sticky in self.stickies.values()
+            if sticky.note["window"].get("pinned") and sticky.isVisible()
+        ]
+        if pinned_stickies:
+            for sticky in list(self.stickies.values()):
+                if sticky not in pinned_stickies:
+                    sticky.close()
+            self.store.save()
+            event.accept()
+            return
         for sticky in list(self.stickies.values()):
             sticky.app_shutdown = True
             sticky.close()

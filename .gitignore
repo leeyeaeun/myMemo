@@ -2,3 +2,7 @@ __pycache__/
 *.py[cod]
 .venv/
 *.pre-sticky
+build/
+dist/
+*.spec
+Memo.exe

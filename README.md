@@ -6,7 +6,7 @@
 
 ## 다운로드
 
-Windows 사용자는 [GitHub Releases](https://github.com/leeyeaeun/myMemo/releases)에서 최신 **`Memo.exe`**를 내려받아 바로 실행할 수 있습니다.
+Windows 사용자는 [GitHub Releases](https://github.com/leeyeaeun/myMemo/releases)에서 최신 **Memo.exe**를 내려받아 바로 실행할 수 있습니다.
 
 개인 제작 앱이라 코드 서명이 없어 Windows SmartScreen이 표시될 수 있습니다. 이 저장소를 신뢰한다면 **추가 정보 → 실행**을 선택합니다.
 

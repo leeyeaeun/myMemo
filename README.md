@@ -4,6 +4,12 @@
 
 로컬 전용 미니멀 메모 앱
 
+## 다운로드
+
+Windows 사용자는 [GitHub Releases](https://github.com/leeyeaeun/myMemo/releases)에서 최신 **`Memo.exe`**를 내려받아 바로 실행할 수 있습니다.
+
+개인 제작 앱이라 코드 서명이 없어 Windows SmartScreen이 표시될 수 있습니다. 이 저장소를 신뢰한다면 **추가 정보 → 실행**을 선택합니다.
+
 ## 실행
 
 로컬 빌드에서는 프로젝트 폴더의 **`Memo.exe`** 또는 바탕화면의 **`Memo App`** 바로가기를 실행합니다. 독립 실행 파일이므로 콘솔 창이 나타나지 않으며, 작업표시줄에도 Memo 아이콘이 표시됩니다.
@@ -16,6 +22,8 @@ py -3 app.py
 ```
 
 `Memo.exe`는 로컬 빌드 산출물이므로 Git 저장소에는 포함하지 않습니다.
+
+`v1.0.0`처럼 `v*` 태그를 푸시하면 GitHub Actions가 Windows 실행 파일과 SHA-256 체크섬을 자동으로 빌드해 새 Release에 첨부합니다.
 
 ## 스티키 메모
 

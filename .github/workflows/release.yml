@@ -1,0 +1,70 @@
+name: Build Windows release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller==6.21.0
+
+      - name: Build Memo.exe
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onefile --windowed `
+            --name Memo `
+            --icon assets/memo-icon.ico `
+            --add-data "assets;assets" `
+            app.py
+
+      - name: Create checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -LiteralPath dist/Memo.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  Memo.exe" | Set-Content -LiteralPath dist/Memo.exe.sha256 -Encoding ascii
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $notes = @(
+            "## Memo $tag"
+            ""
+            "A simple, ad-free, uncluttered notes app for Windows."
+            ""
+            "### Download"
+            "Download **Memo.exe** below and run it directly."
+            ""
+            "> Windows SmartScreen may appear because this personal build is not code-signed. Choose **More info → Run anyway** if you trust this repository."
+            ""
+            "Notes are stored locally in `%LOCALAPPDATA%\Memo`."
+          ) -join "`n"
+          $notes | Set-Content -LiteralPath release-notes.md -Encoding utf8
+          gh release create $tag `
+            "dist/Memo.exe#Memo.exe" `
+            "dist/Memo.exe.sha256#Memo.exe.sha256" `
+            --repo "${{ github.repository }}" `
+            --title "Memo $tag" `
+            --notes-file release-notes.md

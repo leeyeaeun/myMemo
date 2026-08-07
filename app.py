@@ -47,6 +47,31 @@ def storage_path() -> Path:
     return path
 
 
+def preferences_path() -> Path:
+    return storage_path().with_name("settings.json")
+
+
+def load_preferences() -> dict:
+    defaults = {"pet": {"visible": True, "size": 180, "x": None, "y": None}}
+    path = preferences_path()
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        saved = {}
+    pet = saved.get("pet", {}) if isinstance(saved, dict) else {}
+    defaults["pet"].update({key: pet[key] for key in defaults["pet"] if key in pet})
+    try:
+        defaults["pet"]["size"] = max(96, min(320, int(defaults["pet"]["size"])))
+    except (TypeError, ValueError):
+        defaults["pet"]["size"] = 180
+    return defaults
+
+
+def save_preferences(preferences: dict) -> None:
+    path = preferences_path()
+    path.write_text(json.dumps(preferences, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def new_note(color: str = NOTE_COLORS[0]) -> dict:
     stamp = now_iso()
     return {
@@ -355,6 +380,112 @@ class ReorderableNoteList(QListWidget):
         super().dropEvent(event)
         if event.isAccepted():
             self.order_changed.emit()
+
+
+class DesktopPet(QWidget):
+    toggled = Signal()
+    moved = Signal(int, int)
+    size_requested = Signal()
+    hide_requested = Signal()
+
+    def __init__(self, size: int) -> None:
+        super().__init__(
+            None,
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.WindowDoesNotAcceptFocus,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("클릭: 모든 메모 표시/숨김 · 드래그: 이동 · 우클릭: 설정")
+        self.pixmap = QPixmap(str(asset_path("memo-pet.png")))
+        self.pet_size = 180
+        self.press_global: QPoint | None = None
+        self.window_origin: QPoint | None = None
+        self.dragged = False
+        self.set_pet_size(size)
+
+    def set_pet_size(self, size: int) -> None:
+        self.pet_size = max(96, min(320, int(size)))
+        if self.pixmap.isNull():
+            self.setFixedSize(self.pet_size, self.pet_size)
+            return
+        ratio = self.pixmap.width() / max(1, self.pixmap.height())
+        width = max(72, round(self.pet_size * ratio))
+        self.setFixedSize(width, self.pet_size)
+        scaled = self.pixmap.scaled(
+            self.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+        self.setMask(scaled.mask())
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+        if not self.pixmap.isNull():
+            painter.drawPixmap(
+                self.rect(),
+                self.pixmap.scaled(
+                    self.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.FastTransformation,
+                ),
+            )
+        super().paintEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.press_global = event.globalPosition().toPoint()
+            self.window_origin = self.pos()
+            self.dragged = False
+            self.setWindowOpacity(.82)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self.press_global is not None and self.window_origin is not None:
+            delta = event.globalPosition().toPoint() - self.press_global
+            if delta.manhattanLength() >= QApplication.startDragDistance():
+                self.dragged = True
+            if self.dragged:
+                self.move(self.window_origin + delta)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.press_global is not None:
+            self.setWindowOpacity(1.0)
+            if self.dragged:
+                self.moved.emit(self.x(), self.y())
+            else:
+                self.toggled.emit()
+            self.press_global = None
+            self.window_origin = None
+            self.dragged = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event) -> None:
+        menu = QMenu(self)
+        toggle = menu.addAction("모든 메모 표시 / 숨김")
+        menu.addSeparator()
+        size = menu.addAction("펫 크기 조절…")
+        hide = menu.addAction("펫 숨기기")
+        chosen = menu.exec(event.globalPos())
+        if chosen == toggle:
+            self.toggled.emit()
+        elif chosen == size:
+            self.size_requested.emit()
+        elif chosen == hide:
+            self.hide_requested.emit()
 
 
 class StickyWindow(QWidget):
@@ -809,9 +940,11 @@ class NotesWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.store = Store()
+        self.preferences = load_preferences()
         self.current_id: str | None = None
         self.loading = False
         self.stickies: dict[str, StickyWindow] = {}
+        self.pet: DesktopPet | None = None
         self.save_timer = QTimer(self)
         self.save_timer.setSingleShot(True)
         self.save_timer.setInterval(350)
@@ -823,6 +956,7 @@ class NotesWindow(QMainWindow):
         self.apply_style()
         self.refresh_list(select_id=self.store.notes[0]["id"])
         QTimer.singleShot(100, self.restore_stickies)
+        QTimer.singleShot(180, self.restore_pet)
 
     def button(self, text, tip, callback, width=36) -> QToolButton:
         button = QToolButton()
@@ -996,6 +1130,110 @@ class NotesWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
+    def restore_pet(self) -> None:
+        if self.preferences["pet"].get("visible", True):
+            self.show_pet()
+
+    def show_pet(self) -> None:
+        pet_settings = self.preferences["pet"]
+        if self.pet is None:
+            self.pet = DesktopPet(int(pet_settings.get("size", 180)))
+            self.pet.toggled.connect(self.toggle_all_stickies)
+            self.pet.moved.connect(self.persist_pet_position)
+            self.pet.size_requested.connect(self.pet_size_dialog)
+            self.pet.hide_requested.connect(lambda: self.set_pet_visible(False))
+        else:
+            self.pet.set_pet_size(int(pet_settings.get("size", 180)))
+
+        screen = QApplication.screenAt(self.pos()) or QApplication.primaryScreen()
+        available = screen.availableGeometry()
+        x, y = pet_settings.get("x"), pet_settings.get("y")
+        if x is None or y is None:
+            x = available.right() - self.pet.width() - 34
+            y = available.bottom() - self.pet.height() - 42
+        x = max(available.left(), min(int(x), available.right() - self.pet.width() + 1))
+        y = max(available.top(), min(int(y), available.bottom() - self.pet.height() + 1))
+        self.pet.move(x, y)
+        self.pet.show()
+        self.pet.raise_()
+
+    def set_pet_visible(self, visible: bool) -> None:
+        self.preferences["pet"]["visible"] = bool(visible)
+        if visible:
+            self.show_pet()
+            self.status.setText("돌고래 펫을 표시했습니다")
+        elif self.pet is not None:
+            self.persist_pet_position(self.pet.x(), self.pet.y(), save=False)
+            self.pet.hide()
+            self.status.setText("돌고래 펫을 숨겼습니다")
+        save_preferences(self.preferences)
+        if not visible and not self.isVisible() and not any(
+            sticky.isVisible() for sticky in self.stickies.values()
+        ):
+            QApplication.quit()
+
+    def persist_pet_position(self, x: int, y: int, save: bool = True) -> None:
+        self.preferences["pet"]["x"] = int(x)
+        self.preferences["pet"]["y"] = int(y)
+        if save:
+            save_preferences(self.preferences)
+
+    def reset_pet_position(self) -> None:
+        self.preferences["pet"]["x"] = None
+        self.preferences["pet"]["y"] = None
+        save_preferences(self.preferences)
+        if self.pet is not None and self.pet.isVisible():
+            self.show_pet()
+
+    def pet_size_dialog(self) -> None:
+        original = int(self.preferences["pet"].get("size", 180))
+        dialog = QDialog(self if self.isVisible() else None)
+        dialog.setWindowTitle("돌고래 펫 크기")
+        dialog.setMinimumWidth(330)
+        layout = QVBoxLayout(dialog)
+        label = QLabel(f"높이: {original} px")
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(96, 320)
+        slider.setSingleStep(8)
+        slider.setPageStep(32)
+        slider.setValue(original)
+
+        def preview(value: int) -> None:
+            label.setText(f"높이: {value} px")
+            if self.pet is not None:
+                self.pet.set_pet_size(value)
+
+        slider.valueChanged.connect(preview)
+        buttons = QHBoxLayout()
+        cancel = QPushButton("취소")
+        apply_button = QPushButton("적용")
+        cancel.clicked.connect(dialog.reject)
+        apply_button.clicked.connect(dialog.accept)
+        buttons.addStretch(); buttons.addWidget(cancel); buttons.addWidget(apply_button)
+        layout.addWidget(label); layout.addWidget(slider); layout.addLayout(buttons)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.preferences["pet"]["size"] = slider.value()
+            if self.pet is not None:
+                self.persist_pet_position(self.pet.x(), self.pet.y(), save=False)
+            save_preferences(self.preferences)
+        elif self.pet is not None:
+            self.pet.set_pet_size(original)
+
+    def toggle_all_stickies(self) -> None:
+        self.save_current(False)
+        all_visible = bool(self.store.notes) and all(
+            note["id"] in self.stickies and self.stickies[note["id"]].isVisible()
+            for note in self.store.notes
+        )
+        if all_visible:
+            for sticky in self.stickies.values():
+                sticky.hide()
+            self.status.setText("모든 스티키 메모를 숨겼습니다")
+            return
+        for note in self.store.notes:
+            self.open_sticky(note)
+        self.status.setText("모든 스티키 메모를 표시했습니다")
+
     def list_context_menu(self, pos) -> None:
         item = self.list.itemAt(pos)
         if not item:
@@ -1119,9 +1357,18 @@ class NotesWindow(QMainWindow):
         theme_actions = {}
         for name in THEMES:
             theme_actions[theme_menu.addAction(name)] = name
+        pet_menu = menu.addMenu("돌고래 데스크톱 펫")
+        pet_visible = pet_menu.addAction("바탕화면에 표시")
+        pet_visible.setCheckable(True)
+        pet_visible.setChecked(bool(self.preferences["pet"].get("visible", True)))
+        pet_size = pet_menu.addAction("크기 조절…")
+        pet_reset = pet_menu.addAction("위치 초기화")
         menu.addSeparator(); export = menu.addAction("백업 내보내기…"); imp = menu.addAction("백업 불러오기…"); location = menu.addAction("저장 위치 보기")
         chosen = menu.exec(self.more_button.mapToGlobal(self.more_button.rect().bottomLeft()))
         if chosen in theme_actions: self.apply_palette(THEMES[theme_actions[chosen]])
+        elif chosen == pet_visible: self.set_pet_visible(pet_visible.isChecked())
+        elif chosen == pet_size: self.pet_size_dialog()
+        elif chosen == pet_reset: self.reset_pet_position()
         elif chosen == export: self.export_backup()
         elif chosen == imp: self.import_backup()
         elif chosen == location: QMessageBox.information(self, "저장 위치", str(self.store.path))
@@ -1147,6 +1394,9 @@ class NotesWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self.save_timer.stop(); self.save_current(False)
+        if self.pet is not None:
+            self.persist_pet_position(self.pet.x(), self.pet.y(), save=False)
+        save_preferences(self.preferences)
         visible_stickies = [sticky for sticky in self.stickies.values() if sticky.isVisible()]
         if visible_stickies:
             self.store.save()
